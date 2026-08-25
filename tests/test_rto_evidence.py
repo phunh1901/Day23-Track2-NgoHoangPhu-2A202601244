@@ -19,7 +19,7 @@ TARGET_RTO = 300.0
 
 def jsonl(p):
     p = pathlib.Path(p)
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()] if p.exists() else []
 
 
 @pytest.fixture(scope="module")
@@ -64,13 +64,13 @@ def test_evidence_table_tro_vao_file_that():
     """Mọi Evidence cell phải là path[:line] tồn tại thật, không phải mô tả chung."""
     f = R / "rto-evidence.md"
     assert f.exists(), "thieu reports/rto-evidence.md"
-    refs = re.findall(r"`([\w./-]+\.(?:jsonl|json|md|log|py))(?::(\d+))?`", f.read_text())
+    refs = re.findall(r"`([\w./-]+\.(?:jsonl|json|md|log|py))(?::(\d+))?`", f.read_text(encoding="utf-8"))
     assert len(refs) >= 5, f"chi tim thay {len(refs)} evidence path, can >= 5"
     for path, line in refs:
         p = pathlib.Path(path)
         assert p.exists(), f"evidence tro vao file khong ton tai: {path}"
         if line:
-            n = len(p.read_text().splitlines())
+            n = len(p.read_text(encoding="utf-8").splitlines())
             assert int(line) <= n, f"{path}:{line} vuot qua so dong that ({n})"
 
 
@@ -84,7 +84,7 @@ def test_chaos_khong_giet_ca_hai_region():
 
 def test_evidence_table_da_dien_that(m2):
     """Template chua dien KHONG duoc tinh la evidence."""
-    t = (R / "rto-evidence.md").read_text()
+    t = (R / "rto-evidence.md").read_text(encoding="utf-8")
     assert "TEMPLATE" not in t, "van con la template chua dien"
     assert "`__" not in t and "| `__s`" not in t and "+__s" not in t, \
         "con placeholder __ trong bang evidence"
@@ -97,7 +97,7 @@ def test_so_trong_bang_khop_voi_so_trong_log(m2):
     """
     assert m2["rto_measured_s"] is not None, \
         "chua do duoc RTO (drill 2 chua chay hoac chua hop le) -- chua the doi chieu so"
-    t = (R / "rto-evidence.md").read_text()
+    t = (R / "rto-evidence.md").read_text(encoding="utf-8")
     nums = [float(x) for x in re.findall(r"(\d+\.?\d*)\s*s", t)]
     rto = m2["rto_measured_s"]
     assert any(abs(n - rto) <= 1.0 for n in nums), \
@@ -110,6 +110,6 @@ def test_so_trong_bang_khop_voi_so_trong_log(m2):
 def test_postmortem_co_gap_analysis():
     f = R / "postmortem.md"
     assert f.exists(), "thieu reports/postmortem.md"
-    t = f.read_text().lower()
+    t = f.read_text(encoding="utf-8").lower()
     for k in ["rto", "rpo", "gap", "action item"]:
         assert k in t, f"postmortem thieu phan '{k}'"

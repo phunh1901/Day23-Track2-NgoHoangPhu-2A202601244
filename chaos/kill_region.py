@@ -31,6 +31,7 @@ import os
 import pathlib
 import signal
 import subprocess
+import sys
 import time
 
 import httpx
@@ -63,16 +64,71 @@ def is_alive(region: str, timeout=1.5) -> bool:
         return False
 
 
-def pid_of(region: str) -> int | None:
+def pids_of(region: str) -> list[int]:
+    pids = set()
     f = PID_DIR / f"region-{region}.pid"
-    if not f.exists():
-        return None
-    pid = int(f.read_text().strip())
-    try:
-        os.kill(pid, 0)
-        return pid
-    except OSError:
-        return None
+    if f.exists():
+        try:
+            pid = int(f.read_text().strip())
+            pids.add(pid)
+        except Exception:
+            pass
+    port = 8001 if region == "a" else 8002
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output(f'netstat -ano | findstr :{port}', shell=True).decode()
+            for line in out.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 5 and "LISTENING" in parts:
+                    pids.add(int(parts[-1]))
+        except Exception:
+            pass
+    return list(pids)
+
+
+def pid_of(region: str) -> int | None:
+    pids = pids_of(region)
+    return pids[0] if pids else None
+
+
+def _suspend_pid(pid: int):
+    if sys.platform == "win32":
+        import ctypes
+        PROCESS_ALL_ACCESS = 0x1F0FFF
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        if handle:
+            try:
+                ctypes.windll.ntdll.NtSuspendProcess(handle)
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+    else:
+        os.kill(pid, signal.SIGSTOP)
+
+
+def _resume_pid(pid: int):
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        PROCESS_ALL_ACCESS = 0x1F0FFF
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        if handle:
+            try:
+                prev = wintypes.ULONG(1)
+                for _ in range(20):
+                    status = ctypes.windll.ntdll.NtResumeProcess(handle, ctypes.byref(prev))
+                    if status != 0 or prev.value <= 1:
+                        break
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+    else:
+        os.kill(pid, signal.SIGCONT)
+
+
+def _kill_pid(pid: int):
+    if sys.platform == "win32":
+        os.kill(pid, signal.SIGTERM)
+    else:
+        os.kill(pid, signal.SIGKILL)
 
 
 def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
@@ -90,13 +146,20 @@ def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
                other_region=other, other_alive=other_alive, forced_both=force_both,
                note="t_outage_start — moc 0 cua RTO clock")
     if backend == "bare":
-        pid = pid_of(region)
-        if pid is None:
+        pids = pids_of(region)
+        if not pids:
             raise SystemExit(f"khong tim thay PID cua region-{region} trong {PID_DIR}")
-        # netblock: SIGSTOP -> TCP handshake vẫn xong nhưng không ai trả lời => request TREO
+        # netblock: SIGSTOP/NtSuspendProcess -> TCP handshake vẫn xong nhưng không ai trả lời => request TREO
         #           (đúng hành vi của iptables DROP ở tầng app)
-        # stop    : SIGKILL -> cổng đóng => ConnectError ngay
-        os.kill(pid, signal.SIGSTOP if mode == "netblock" else signal.SIGKILL)
+        # stop    : SIGKILL/SIGTERM -> cổng đóng => ConnectError ngay
+        for pid in pids:
+            try:
+                if mode == "netblock":
+                    _suspend_pid(pid)
+                else:
+                    _kill_pid(pid)
+            except Exception:
+                pass
     else:
         svc = f"serving-{region}"
         if mode == "stop":
@@ -109,10 +172,14 @@ def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
 
 def restore(region: str, backend: str):
     if backend == "bare":
-        pid = pid_of(region)
-        if pid:
-            os.kill(pid, signal.SIGCONT)
-            return event(action="restore", region=region, method="SIGCONT", pid=pid)
+        pids = pids_of(region)
+        if pids:
+            for pid in pids:
+                try:
+                    _resume_pid(pid)
+                except Exception:
+                    pass
+            return event(action="restore", region=region, method="SIGCONT", pid=pids[0])
         return event(action="restore", region=region, method="need_manual_start",
                      note="process da bi SIGKILL, chay `make up-bare` lai")
     subprocess.run(["docker", "compose", "start", f"serving-{region}"], check=False)
